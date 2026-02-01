@@ -290,6 +290,14 @@ add_executable(leveldbutil
 )
 target_link_libraries(leveldbutil leveldb)
 
+add_executable(leveldb_stacktrace
+  "tools/leveldb_stacktrace.cc"
+)
+target_link_libraries(leveldb_stacktrace leveldb)
+if(WIN32)
+  target_link_libraries(leveldb_stacktrace dbghelp)
+endif()
+
 if(LEVELDB_BUILD_TESTS)
   enable_testing()
 

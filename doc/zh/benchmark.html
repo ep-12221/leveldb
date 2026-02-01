@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>LevelDB 基准测试</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style>
+body {
+  font-family:Helvetica,sans-serif;
+  padding:20px;
+}
+
+h2 {
+  padding-top:30px;
+}
+
+table.bn {
+  width:800px;
+  border-collapse:collapse;
+  border:0;
+  padding:0;
+}
+
+table.bnbase {
+  width:650px;
+}
+
+table.bn td {
+  padding:2px 0;
+}
+
+table.bn td.c1 {
+  font-weight:bold;
+  width:150px;
+}
+
+table.bn td.c1 div.e {
+  float:right;
+  font-weight:normal;
+}
+
+table.bn td.c2 {
+  width:150px;
+  text-align:right;
+  padding:2px;
+}
+
+table.bn td.c3 {
+  width:350px;
+}
+
+table.bn td.c4 {
+  width:150px;
+  font-size:small;
+  padding-left:4px;
+}
+
+/* chart bars */
+div.bldb {
+  background-color:#0255df;
+}
+
+div.bkct {
+  background-color:#df5555;
+}
+
+div.bsql {
+  background-color:#aadf55;
+}
+
+.code {
+  font-family:monospace;
+  font-size:large;
+}
+
+.todo {
+  color: red;
+}
+
+</style>
+</head>
+<body>
+<h1>LevelDB 基准测试</h1>
+<p>Google，2011 年 7 月</p>
+<hr>
+
+<p>为了测试 LevelDB 的性能，我们把它与其他成熟的数据库实现进行基准对比。我们将 LevelDB（revision 39）与 <a href="https://www.sqlite.org/">SQLite3</a>（version 3.7.6.3）以及 <a href="https://dbmx.net/kyotocabinet/spex.html">Kyoto Cabinet</a>（version 1.2.67）的 TreeDB（一个基于 B+Tree 的键值存储）进行比较。我们也感谢 Scott Hess 与 Mikio Hirabayashi 分别为 SQLite3 与 Kyoto Cabinet 基准测试提供的建议与贡献。</p>
+
+<p>所有基准测试都在一颗六核 Intel(R) Xeon(R) CPU X5650 @ 2.67GHz 上进行，总 L3 缓存 12288 KB，内存为 12 GB DDR3（1333 MHz）。（注意：由于这些基准测试为单线程，LevelDB 最多使用两个 CPU：一个用于运行基准测试，一个用于后台 compaction。）我们在两台（处理器相同的）机器上运行了测试：一台使用 Ext3 文件系统，另一台使用 Ext4 文件系统。Ext3 机器的硬盘是 SATA Hitachi HDS721050CLA362；Ext4 机器的硬盘是 SATA Samsung HD502HJ。两块硬盘均为 7200 RPM，且启用了硬盘写缓存（使用 `hdparm -W 1 [device]`）。下文报告的数字为三次测量的中位数。</p>
+
+<h4>基准测试源代码</h4>
+<p>我们基于 LevelDB 的 <span class="code">db_bench</span> 为 SQLite 与 Kyoto TreeDB 编写了基准测试工具。各基准测试的代码在这里：</p>
+<ul>
+	<li> <b>LevelDB：</b> <a href="https://github.com/google/leveldb/blob/main/benchmarks/db_bench.cc">benchmarks/db_bench.cc</a>。</li>
+	<li> <b>SQLite：</b> <a href="https://github.com/google/leveldb/blob/main/benchmarks/db_bench_sqlite3.cc">benchmarks/db_bench_sqlite3.cc</a>。</li>
+	<li> <b>Kyoto TreeDB：</b> <a href="https://github.com/google/leveldb/blob/main/benchmarks/db_bench_tree_db.cc">benchmarks/db_bench_tree_db.cc</a>。</li>
+</ul>
+
+<h4>自定义构建规格</h4>
+<ul>
+<li>LevelDB：LevelDB 使用 <a href="https://github.com/gperftools/gperftools">tcmalloc</a> 库与 <a href="https://github.com/google/snappy">Snappy</a> 压缩库（revision 33）进行编译，并禁用了断言（Assertions）。</li>
+<li>TreeDB：TreeDB 使用 <a href="https://www.oberhumer.com/opensource/lzo/">LZO</a> 压缩库（version 2.03）编译。此外，我们在打开数据库时启用了 TSMALL 与 TLINEAR 选项，以减少每条记录的占用。</li>
+<li>SQLite：我们通过把锁模式设为 exclusive 来调优 SQLite 性能，并启用了 SQLite 的 <a href="https://www.sqlite.org/draft/wal.html">write-ahead logging</a>。</li>
+</ul>
+
+<h2>1. 基线性能</h2>
+<p>本节给出各数据库的基线性能。后续章节展示当不同参数变化时性能如何变化。对于基线测试：</p>
+<ul>
+	<li> 每个数据库允许使用 4 MB 的缓存内存。</li>
+        <li> 数据库以 <em>异步</em> 写模式打开。（LevelDB 的 sync 选项、TreeDB 的 OAUTOSYNC 选项，以及 SQLite3 的 synchronous 选项都关闭。）也就是说，每次写入都会推送到操作系统，但基准测试不会等待写入到达磁盘。</li>
+	<li> Key 长度为 16 字节。</li>
+        <li> Value 长度为 100 字节（包含足够冗余，使得简单压缩器可将其压缩到原始大小的 50%）。</li>
+	<li> 顺序读/写按 key 空间的递增顺序遍历。</li>
+	<li> 随机读/写按随机顺序遍历 key 空间。</li>
+</ul>
+
+<h3>A. 顺序读取</h3>
+<table class="bn bnbase">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">4,030,000 ops/sec</td>
+    <td class="c3"><div class="bldb" style="width:350px">&nbsp;</div></td>
+<tr><td class="c1">Kyoto TreeDB</td>
+    <td class="c2">1,010,000 ops/sec</td>
+    <td class="c3"><div class="bkct" style="width:95px">&nbsp;</div></td>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">383,000 ops/sec</td>
+    <td class="c3"><div class="bsql" style="width:33px">&nbsp;</div></td>
+</table>
+<h3>B. 随机读取</h3>
+<table class="bn bnbase">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">129,000 ops/sec</td>
+    <td class="c3"><div class="bldb" style="width:298px">&nbsp;</div></td>
+<tr><td class="c1">Kyoto TreeDB</td>
+    <td class="c2">151,000 ops/sec</td>
+    <td class="c3"><div class="bkct" style="width:350px">&nbsp;</div></td>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">134,000 ops/sec</td>
+    <td class="c3"><div class="bsql" style="width:310px">&nbsp;</div></td>
+</table>
+<h3>C. 顺序写入</h3>
+<table class="bn bnbase">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">779,000 ops/sec</td>
+    <td class="c3"><div class="bldb" style="width:350px">&nbsp;</div></td>
+<tr><td class="c1">Kyoto TreeDB</td>
+    <td class="c2">342,000 ops/sec</td>
+    <td class="c3"><div class="bkct" style="width:154px">&nbsp;</div></td>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">48,600 ops/sec</td>
+    <td class="c3"><div class="bsql" style="width:22px">&nbsp;</div></td>
+</table>
+<h3>D. 随机写入</h3>
+<table class="bn bnbase">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">164,000 ops/sec</td>
+    <td class="c3"><div class="bldb" style="width:350px">&nbsp;</div></td>
+<tr><td class="c1">Kyoto TreeDB</td>
+    <td class="c2">88,500 ops/sec</td>
+    <td class="c3"><div class="bkct" style="width:188px">&nbsp;</div></td>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">9,860 ops/sec</td>
+    <td class="c3"><div class="bsql" style="width:21px">&nbsp;</div></td>
+</table>
+
+<p>LevelDB 在顺序与随机写入以及顺序读取方面都优于 SQLite3 与 TreeDB；而 Kyoto Cabinet 在随机读取方面最快。</p>
+
+<h2>2. 不同配置下的写入性能</h2>
+<h3>A. 大 Value</h3>
+<p>在该基准测试中，我们从一个空数据库开始，写入 100,000 字节的 value（约 50% 可压缩）。为保证运行时间合理，我们在写入 1000 个 value 后停止。</p>
+<h4>顺序写入</h4>
+<table class="bn bnbase">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">1,100 ops/sec</td>
+    <td class="c3"><div class="bldb" style="width:234px">&nbsp;</div></td></tr>
+<tr><td class="c1">Kyoto TreeDB</td>
+    <td class="c2">1,000 ops/sec</td>
+    <td class="c3"><div class="bkct" style="width:224px">&nbsp;</div></td></tr>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">1,600 ops/sec</td>
+    <td class="c3"><div class="bsql" style="width:350px">&nbsp;</div></td></tr>
+</table>
+<h4>随机写入</h4>
+<table class="bn bnbase">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">480 ops/sec</td>
+    <td class="c3"><div class="bldb" style="width:105px">&nbsp;</div></td></tr>
+<tr><td class="c1">Kyoto TreeDB</td>
+    <td class="c2">1,100 ops/sec</td>
+    <td class="c3"><div class="bkct" style="width:240px">&nbsp;</div></td></tr>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">1,600 ops/sec</td>
+    <td class="c3"><div class="bsql" style="width:350px">&nbsp;</div></td></tr>
+</table>
+<p>当每个 value 都是 100,000 字节的大值时，LevelDB 的表现不如前面。这是因为 LevelDB 至少会把 key 和 value 写两次：第一次写入事务日志；第二次（在一次 compaction 期间）写入一个有序文件。对于更大的 value 来说，额外拷贝大 value 的成本会淹没掉 LevelDB 的单次操作效率。</p>
+
+<h3>B. 批量写入（Batch Writes）</h3>
+<p>批量写入是一组对底层数据库原子应用的写入。一个包含 N 次写入的 batch 可能比 N 次单独写入快得多。下面的基准测试写入 1000 个 batch，每个 batch 包含 1000 个 100 字节 value。TreeDB 不支持 batch write，因此本测试中省略。</p>
+<h4>顺序写入</h4>
+<table class="bn">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">840,000 entries/sec</td>
+    <td class="c3"><div class="bldb" style="width:350px">&nbsp;</div></td>
+    <td class="c4">(1.08x baseline)</td></tr>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">124,000 entries/sec</td>
+    <td class="c3"><div class="bsql" style="width:52px">&nbsp;</div></td>
+    <td class="c4">(2.55x baseline)</td></tr>
+</table>
+<h4>随机写入</h4>
+<table class="bn">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">221,000 entries/sec</td>
+    <td class="c3"><div class="bldb" style="width:350px">&nbsp;</div></td>
+    <td class="c4">(1.35x baseline)</td></tr>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">22,000 entries/sec</td>
+    <td class="c3"><div class="bsql" style="width:34px">&nbsp;</div></td>
+    <td class="c4">(2.23x baseline)</td></tr>
+</table>
+
+<p>由于 LevelDB 的持久化存储组织方式，随机写入的 batch 相比顺序写入的 batch 并没有慢太多（仅约 4 倍）。</p>
+
+<h3>C. 同步写入</h3>
+<p>在下面的基准测试中，我们启用了所有数据库的同步写入模式。由于这会显著降低运行速度，我们在 10,000 次写入后停止。对于同步写入测试，我们关闭了硬盘写缓存（使用 `hdparm -W 0 [device]`）。</p>
+<ul>
+    <li>对 LevelDB，我们设置 WriteOptions.sync = true。</li>
+    <li>对 TreeDB，我们启用 TreeDB 的 OAUTOSYNC 选项。</li>
+    <li>对 SQLite3，我们设置 “PRAGMA synchronous = FULL”。</li>
+</ul>
+<h4>顺序写入</h4>
+<table class="bn">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">100 ops/sec</td>
+    <td class="c3"><div class="bldb" style="width:350px">&nbsp;</div></td>
+    <td class="c4">(0.003x baseline)</td></tr>
+<tr><td class="c1">Kyoto TreeDB</td>
+    <td class="c2">7 ops/sec</td>
+    <td class="c3"><div class="bkct" style="width:27px">&nbsp;</div></td>
+    <td class="c4">(0.0004x baseline)</td></tr>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">88 ops/sec</td>
+    <td class="c3"><div class="bsql" style="width:315px">&nbsp;</div></td>
+    <td class="c4">(0.002x baseline)</td></tr>
+</table>
+<h4>随机写入</h4>
+<table class="bn">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">100 ops/sec</td>
+    <td class="c3"><div class="bldb" style="width:350px">&nbsp;</div></td>
+    <td class="c4">(0.015x baseline)</td></tr>
+<tr><td class="c1">Kyoto TreeDB</td>
+    <td class="c2">8 ops/sec</td>
+    <td class="c3"><div class="bkct" style="width:29px">&nbsp;</div></td>
+    <td class="c4">(0.001x baseline)</td></tr>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">88 ops/sec</td>
+    <td class="c3"><div class="bsql" style="width:314px">&nbsp;</div></td>
+    <td class="c4">(0.009x baseline)</td></tr>
+</table>
+
+<p>也可参考下文的 <code>ext4</code> 性能数据，因为同步写入在 <code>ext3</code> 与 <code>ext4</code> 上的行为差异很大。</p>
+
+<h3>D. 关闭压缩</h3>
+
+<p>在基线测试中，LevelDB 与 TreeDB 都使用了轻量级压缩（LevelDB 使用 <a href="http://code.google.com/p/snappy/">Snappy</a>，TreeDB 使用 <a href="http://www.oberhumer.com/opensource/lzo/">LZO</a>）。SQLite3 默认不使用压缩。下面的实验展示当所有数据库都禁用压缩时会发生什么（SQLite3 的数字仅是其基线测试数据的拷贝）：</p>
+
+<h4>顺序写入</h4>
+<table class="bn">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">594,000 ops/sec</td>
+    <td class="c3"><div class="bldb" style="width:350px">&nbsp;</div></td>
+    <td class="c4">(0.76x baseline)</td></tr>
+<tr><td class="c1">Kyoto TreeDB</td>
+    <td class="c2">485,000 ops/sec</td>
+    <td class="c3"><div class="bkct" style="width:239px">&nbsp;</div></td>
+    <td class="c4">(1.42x baseline)</td></tr>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">48,600 ops/sec</td>
+    <td class="c3"><div class="bsql" style="width:29px">&nbsp;</div></td>
+    <td class="c4">(1.00x baseline)</td></tr>
+</table>
+<h4>随机写入</h4>
+<table class="bn">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">135,000 ops/sec</td>
+    <td class="c3"><div class="bldb" style="width:296px">&nbsp;</div></td>
+    <td class="c4">(0.82x baseline)</td></tr>
+<tr><td class="c1">Kyoto TreeDB</td>
+    <td class="c2">159,000 ops/sec</td>
+    <td class="c3"><div class="bkct" style="width:350px">&nbsp;</div></td>
+    <td class="c4">(1.80x baseline)</td></tr>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">9,860 ops/sec</td>
+    <td class="c3"><div class="bsql" style="width:22px">&nbsp;</div></td>
+    <td class="c4">(1.00x baseline)</td></tr>
+</table>
+
+<p>LevelDB 在开启压缩时写入性能更好，因为压缩降低了写入磁盘的数据量。因此在多数场景下，LevelDB 用户可以保持压缩开启，而无需担心空间占用与性能之间的权衡。相反，TreeDB 的性能在关闭压缩时更好。推测原因是 TreeDB 的压缩库（LZO）比 LevelDB 的压缩库（Snappy）成本更高。</p>
+
+<h3>E. 使用更多内存</h3>
+<p>我们把每个数据库的整体 cache 大小提高到 128 MB。对 LevelDB，我们把 128 MB 分成 120 MB 写缓冲区（write buffer）与 8 MB cache（从 2 MB 写缓冲区与 2 MB cache 提升而来）。对 SQLite3，我们保持 page 大小为 1024 字节，但把 page 数提升到 131,072（从 4096 提升而来）。对 TreeDB，我们也保持 page 大小为 1024 字节，但把 cache 大小提升到 128 MB（从 4 MB 提升而来）。</p>
+<h4>顺序写入</h4>
+<table class="bn">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">812,000 ops/sec</td>
+    <td class="c3"><div class="bldb" style="width:350px">&nbsp;</div></td>
+    <td class="c4">(1.04x baseline)</td></tr>
+<tr><td class="c1">Kyoto TreeDB</td>
+    <td class="c2">321,000 ops/sec</td>
+    <td class="c3"><div class="bkct" style="width:138px">&nbsp;</div></td>
+    <td class="c4">(0.94x baseline)</td></tr>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">48,500 ops/sec</td>
+    <td class="c3"><div class="bsql" style="width:21px">&nbsp;</div></td>
+    <td class="c4">(1.00x baseline)</td></tr>
+</table>
+<h4>随机写入</h4>
+<table class="bn">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">355,000 ops/sec</td>
+    <td class="c3"><div class="bldb" style="width:350px">&nbsp;</div></td>
+    <td class="c4">(2.16x baseline)</td></tr>
+<tr><td class="c1">Kyoto TreeDB</td>
+    <td class="c2">284,000 ops/sec</td>
+    <td class="c3"><div class="bkct" style="width:280px">&nbsp;</div></td>
+    <td class="c4">(3.21x baseline)</td></tr>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">9,670 ops/sec</td>
+    <td class="c3"><div class="bsql" style="width:10px">&nbsp;</div></td>
+    <td class="c4">(0.98x baseline)</td></tr>
+</table>
+
+<p>与基线相比，SQLite 的性能变化不大；但 LevelDB 与 TreeDB 的随机写入性能显著提升。LevelDB 提升的原因是更大的 write buffer 减少了合并有序文件的需要（因为它会生成更少、但更大的有序文件）。TreeDB 的性能提升是因为整个数据库都能驻留在内存中，从而可以进行快速的原地更新。</p>
+
+  <h2>3. 不同配置下的读取性能</h2>
+<h3>A. 更大的缓存</h3>
+<p>我们把每个数据库的内存使用提高到 128 MB。对 LevelDB，我们给 write buffer 分配 8 MB，给 cache 分配 120 MB。其他数据库不区分 write buffer 与 cache，因此直接把它们的 cache 大小设为 128 MB。</p>
+<h4>顺序读取</h4>
+<table class="bn">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">5,210,000 ops/sec</td>
+    <td class="c3"><div class="bldb" style="width:350px">&nbsp;</div></td>
+    <td class="c4">(1.29x baseline)</td></tr>
+<tr><td class="c1">Kyoto TreeDB</td>
+    <td class="c2">1,070,000 ops/sec</td>
+    <td class="c3"><div class="bkct" style="width:72px">&nbsp;</div></td>
+    <td class="c4">(1.06x baseline)</td></tr>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">609,000 ops/sec</td>
+    <td class="c3"><div class="bsql" style="width:41px">&nbsp;</div></td>
+    <td class="c4">(1.59x baseline)</td></tr>
+</table>
+
+<h4>随机读取</h4>
+<table class="bn">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">190,000 ops/sec</td>
+    <td class="c3"><div class="bldb" style="width:144px">&nbsp;</div></td>
+    <td class="c4">(1.47x baseline)</td></tr>
+<tr><td class="c1">Kyoto TreeDB</td>
+    <td class="c2">463,000 ops/sec</td>
+    <td class="c3"><div class="bkct" style="width:350px">&nbsp;</div></td>
+    <td class="c4">(3.07x baseline)</td></tr>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">186,000 ops/sec</td>
+    <td class="c3"><div class="bsql" style="width:141px">&nbsp;</div></td>
+    <td class="c4">(1.39x baseline)</td></tr>
+</table>
+
+<p>如预期，扩大缓存后，所有数据库的读取性能都有提升。特别地，TreeDB 似乎能非常有效地利用“足以容纳整个数据库”的 cache。</p>
+
+<h3>B. 无压缩读取</h3>
+<p>在该基准测试中，我们先用 100 万条记录填充数据库，每条记录由 16 字节 key 与 100 字节 value 组成。我们编译 LevelDB 与 Kyoto Cabinet 时禁用了压缩支持，因此从数据库读出的结果已经是未压缩的。我们列出 SQLite3 的基线读取性能作为对比点。</p>
+<h4>顺序读取</h4>
+<table class="bn">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">4,880,000 ops/sec</td>
+    <td class="c3"><div class="bldb" style="width:350px">&nbsp;</div></td>
+    <td class="c4">(1.21x baseline)</td></tr>
+<tr><td class="c1">Kyoto TreeDB</td>
+    <td class="c2">1,230,000 ops/sec</td>
+    <td class="c3"><div class="bkct" style="width:88px">&nbsp;</div></td>
+    <td class="c4">(3.60x baseline)</td></tr>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">383,000 ops/sec</td>
+    <td class="c3"><div class="bsql" style="width:27px">&nbsp;</div></td>
+    <td class="c4">(1.00x baseline)</td></tr>
+</table>
+<h4>随机读取</h4>
+<table class="bn">
+<tr><td class="c1">LevelDB</td>
+    <td class="c2">149,000 ops/sec</td>
+    <td class="c3"><div class="bldb" style="width:300px">&nbsp;</div></td>
+    <td class="c4">(1.16x baseline)</td></tr>
+<tr><td class="c1">Kyoto TreeDB</td>
+    <td class="c2">175,000 ops/sec</td>
+    <td class="c3"><div class="bkct" style="width:350px">&nbsp;</div></td>
+    <td class="c4">(1.16x baseline)</td></tr>
+<tr><td class="c1">SQLite3</td>
+    <td class="c2">134,000 ops/sec</td>
+    <td class="c3"><div class="bsql" style="width:268px">&nbsp;</div></td>
+    <td class="c4">(1.00x baseline)</td></tr>
+</table>
+
+<p>在禁用压缩时，LevelDB 与 TreeDB 的性能都有小幅提升。不过要注意：在不同工作负载下，如果压缩能让更多工作集装进内存，那么开启压缩的性能可能反而更好。</p>
+
+<h2>关于 Ext4 文件系统的说明</h2>
+<p>以上数字来自 ext3 文件系统。在 <a href="https://en.wikipedia.org/wiki/Ext4">ext4</a> 下，同步写入会慢得多（LevelDB 降至约 31 writes/second，TreeDB 降至约 5 writes/second；SQLite3 的同步写入则没有明显下降），原因是 ext4 对 <span class="code">fsync</span> / <span class="code">msync</span> 调用的处理方式不同。即使是 LevelDB 的异步写入性能也会有所下降，因为它把存储分散到多个文件，并且在切换到新文件时会调用 <span class="code">fsync</span>。</p>
+
+<h2>致谢</h2>
+<p>Jeff Dean 与 Sanjay Ghemawat 编写了 LevelDB。Kevin Tseng 编写并跑出了这些基准测试。Mikio Hirabayashi、Scott Hess 与 Gabor Cselle 提供了帮助与建议。</p>
+</body>
+</html>
+
